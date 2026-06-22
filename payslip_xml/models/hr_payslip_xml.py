@@ -34,5 +34,9 @@ class Hrpayslip(models.Model):
         )
 
         cfdi_values['nomina_receptor']['salario_diario_integrado'] = integrated_daily_wage
-        _logger.warning("CFDI OVERRIDE EJECUTANDO")
+        cfdi_values['nomina_receptor']['salario_base_cot_apor'] = integrated_daily_wage
+        cfdi_values['nomina_receptor']['fecha_inicio_rel_laboral'] = self.employee_id.x_studio_fecha_ingreso.isoformat()
+        cfdi_values['nomina_receptor']['antigüedad'] = f'P{(self.date_to - self.employee_id.x_studio_fecha_ingreso).days // 7}W'
+        
         return cfdi_values
+    
