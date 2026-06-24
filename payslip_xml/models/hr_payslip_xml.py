@@ -15,8 +15,10 @@ class Hrpayslip(models.Model):
     _inherit = 'hr.payslip'
 
     def _l10n_mx_edi_add_payslip_cfdi_values(self, cfdi_values=None):
+        # 1. Obtenemos el diccionario base de Odoo
         cfdi_values = super()._l10n_mx_edi_add_payslip_cfdi_values(cfdi_values)
 
+        # 2. Inicializamos cálculo de reglas
         rules_amount = {
             line.salary_rule_id: abs(line.total)
             for line in self.line_ids
@@ -33,121 +35,109 @@ class Hrpayslip(models.Model):
             else 0
         )
 
+        # 3. Asignación inicial de variables Custom (Fechas de Studio y SDI)
         cfdi_values['nomina_receptor']['salario_diario_integrado'] = integrated_daily_wage
         cfdi_values['nomina_receptor']['salario_base_cot_apor'] = integrated_daily_wage
         cfdi_values['nomina_receptor']['fecha_inicio_rel_laboral'] = self.employee_id.x_studio_fecha_ingreso.isoformat()
         cfdi_values['nomina_receptor']['antigüedad'] = f'P{(self.date_to - self.employee_id.x_studio_fecha_ingreso).days // 7}W'
 
+        # 4. Validamos el Régimen Fiscal
+        is_asimilado = self.version_id.l10n_mx_regime_type == '09'
 
-        # ==========================
-        # Subsidio vs ISR
-        # ==========================
+        if is_asimilado:
+            # ==========================================
+            # LÓGICA PARA ASIMILADOS (Sin Subsidio, Sin IMSS)
+            # ==========================================
+            cfdi_values['otro_pago_list'] = []
+            
+            if cfdi_values.get('nomina'):
+                cfdi_values['nomina']['total_otros_pagos'] = 0.0
 
-        subsidy_amount = 0.0
+            receptor = cfdi_values.get('nomina_receptor', {})
+            
+            # Asignamos False en lugar de .pop() para evitar el KeyError en QWeb
+            for field in [
+                'salario_diario_integrado',
+                'salario_base_cot_apor',
+                'riesgo_puesto',
+                'tipo_jornada',
+            ]:
+                if field in receptor:
+                    receptor[field] = False
+                    
+        else:
+            # ==========================================
+            # LÓGICA PARA EMPLEADOS REGULARES (Subsidio vs ISR)
+            # ==========================================
+            subsidy_amount = 0.0
 
-        # Buscar OtroPago 002
-        for other_payment in cfdi_values.get('otro_pago_list', []):
-            if other_payment.get('tipo_otro_pago') == '002':
-
-                subsidy_amount = float(
-                    other_payment.get('subsidio_causado')
-                    or other_payment.get('importe')
-                    or 0.0
-                )
-
-                # Dejar Importe="0.00"
-                other_payment['importe'] = 0.0
-                break
-
-        if subsidy_amount:
-
-            # Restar subsidio al ISR retenido
-            for deduction in cfdi_values.get('deduccion_list', []):
-                if deduction.get('tipo_deduccion') == '002':
-                    deduction['importe'] = round(
-                        max(float(deduction.get('importe', 0.0)) - subsidy_amount, 0.0),
-                        2
+            # Buscar OtroPago 002
+            for other_payment in cfdi_values.get('otro_pago_list', []):
+                if other_payment.get('tipo_otro_pago') == '002':
+                    subsidy_amount = float(
+                        other_payment.get('subsidio_causado')
+                        or other_payment.get('importe')
+                        or 0.0
                     )
+                    # Dejar Importe="0.00"
+                    other_payment['importe'] = 0.0
                     break
 
-            # ==========================
-            # Recalcular deducciones
-            # ==========================
+            if subsidy_amount:
+                # Restar subsidio al ISR retenido
+                for deduction in cfdi_values.get('deduccion_list', []):
+                    if deduction.get('tipo_deduccion') == '002':
+                        deduction['importe'] = round(
+                            max(float(deduction.get('importe', 0.0)) - subsidy_amount, 0.0),
+                            2
+                        )
+                        break
 
-            total_taxes_withheld = sum(
-                float(d.get('importe', 0.0))
-                for d in cfdi_values.get('deduccion_list', [])
-                if d.get('tipo_deduccion') == '002'
-            )
+        # ==========================
+        # RECALCULAR DEDUCCIONES (Aplica para ambos regímenes)
+        # ==========================
+        total_taxes_withheld = sum(
+            float(d.get('importe', 0.0))
+            for d in cfdi_values.get('deduccion_list', [])
+            if d.get('tipo_deduccion') == '002'
+        )
 
-            total_other_deductions = sum(
-                float(d.get('importe', 0.0))
-                for d in cfdi_values.get('deduccion_list', [])
-                if d.get('tipo_deduccion') != '002'
-            )
+        total_other_deductions = sum(
+            float(d.get('importe', 0.0))
+            for d in cfdi_values.get('deduccion_list', [])
+            if d.get('tipo_deduccion') != '002'
+        )
 
-            total_deductions = (
-                total_taxes_withheld
-                + total_other_deductions
-            )
+        total_deductions = total_taxes_withheld + total_other_deductions
 
-            cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = round(
-                total_taxes_withheld, 2
-            )
+        cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = round(total_taxes_withheld, 2)
+        cfdi_values['nomina_deducciones']['total_otras_deducciones'] = round(total_other_deductions, 2)
+        cfdi_values['nomina']['total_deducciones'] = round(total_deductions, 2)
 
-            cfdi_values['nomina_deducciones']['total_otras_deducciones'] = round(
-                total_other_deductions, 2
-            )
+        # ==========================
+        # RECALCULAR OTROS PAGOS
+        # ==========================
+        total_other_payments = sum(
+            float(op.get('importe', 0.0))
+            for op in cfdi_values.get('otro_pago_list', [])
+        )
 
-            cfdi_values['nomina']['total_deducciones'] = round(
-                total_deductions, 2
-            )
+        cfdi_values['nomina']['total_otros_pagos'] = round(total_other_payments, 2)
 
-            # ==========================
-            # Recalcular Otros Pagos
-            # ==========================
+        # ==========================
+        # RECALCULAR TOTALES DEL CFDI
+        # ==========================
+        total_perceptions = float(cfdi_values['nomina'].get('total_percepciones') or 0.0)
 
-            total_other_payments = sum(
-                float(op.get('importe', 0.0))
-                for op in cfdi_values.get('otro_pago_list', [])
-            )
+        subtotal = round(total_perceptions + total_other_payments, 2)
 
-            cfdi_values['nomina']['total_otros_pagos'] = round(
-                total_other_payments, 2
-            )
+        cfdi_values['subtotal'] = subtotal
+        cfdi_values['concepto']['valor_unitario'] = subtotal
+        cfdi_values['concepto']['importe'] = subtotal
 
-            # ==========================
-            # Recalcular CFDI
-            # ==========================
+        cfdi_values['descuento'] = round(total_deductions, 2)
+        cfdi_values['concepto']['descuento'] = round(total_deductions, 2)
 
-            total_perceptions = float(
-                cfdi_values['nomina'].get('total_percepciones', 0.0)
-            )
+        cfdi_values['total'] = round(subtotal - total_deductions, 2)
 
-            subtotal = round(
-                total_perceptions + total_other_payments,
-                2
-            )
-
-            cfdi_values['subtotal'] = subtotal
-
-            cfdi_values['concepto']['valor_unitario'] = subtotal
-            cfdi_values['concepto']['importe'] = subtotal
-
-            cfdi_values['descuento'] = round(
-                total_deductions,
-                2
-            )
-
-            cfdi_values['concepto']['descuento'] = round(
-                total_deductions,
-                2
-            )
-
-            cfdi_values['total'] = round(
-                subtotal - total_deductions,
-                2
-            )
-        
         return cfdi_values
-    
