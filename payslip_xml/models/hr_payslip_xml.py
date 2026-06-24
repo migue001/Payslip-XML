@@ -61,6 +61,8 @@ class Hrpayslip(models.Model):
                 'salario_base_cot_apor',
                 'riesgo_puesto',
                 'tipo_jornada',
+                'fecha_inicio_rel_laboral',
+                'antigüedad',
             ]:
                 if field in receptor:
                     receptor[field] = False
