@@ -124,15 +124,27 @@ class Hrpayslip(models.Model):
 
         total_deductions = total_taxes_withheld + total_other_deductions
 
-        # CORRECCIÓN DEFINITIVA PARA EVITAR KEYERROR Y RECHAZO SAT (NOM92)
-        # Dejamos la llave para que QWeb no explote, pero con valor False para que Odoo no la meta al XML
+        # ==========================================
+        # CORRECCIÓN DE TOTALES (PREVENCIÓN RECHAZO SAT)
+        # ==========================================
+        # 1. Validación de Impuestos Retenidos (Evita error NOM92)
         if total_taxes_withheld > 0:
             cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = round(total_taxes_withheld, 2)
         else:
             cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = False
 
+        # 2. Otras deducciones
         cfdi_values['nomina_deducciones']['total_otras_deducciones'] = round(total_other_deductions, 2)
-        cfdi_values['nomina']['total_deducciones'] = round(total_deductions, 2)
+
+        # 3. Validación de Total Deducciones (CORRIGE ERROR NOM38)
+        if total_deductions > 0:
+            cfdi_values['nomina']['total_deducciones'] = round(total_deductions, 2)
+        else:
+            # Al asignar False, Odoo elimina el atributo 'TotalDeducciones' del XML
+            cfdi_values['nomina']['total_deducciones'] = False
+            # También eliminamos el nodo secundario si el total es cero
+            if 'nomina_deducciones' in cfdi_values:
+                cfdi_values['nomina_deducciones'] = False
 
         # ==========================================
         # RECALCULAR OTROS PAGOS
@@ -174,9 +186,11 @@ class Hrpayslip(models.Model):
         cfdi_values['concepto']['valor_unitario'] = subtotal
         cfdi_values['concepto']['importe'] = subtotal
 
-        cfdi_values['descuento'] = round(total_deductions, 2)
-        cfdi_values['concepto']['descuento'] = round(total_deductions, 2)
+        # Ajustamos los descuentos globales considerando si total_deductions es False
+        descuento_final = round(total_deductions, 2) if total_deductions else 0.0
+        cfdi_values['descuento'] = descuento_final
+        cfdi_values['concepto']['descuento'] = descuento_final
 
-        cfdi_values['total'] = round(subtotal - total_deductions, 2)
+        cfdi_values['total'] = round(subtotal - descuento_final, 2)
 
         return cfdi_values
