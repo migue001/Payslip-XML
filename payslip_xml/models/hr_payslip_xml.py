@@ -46,30 +46,36 @@ class Hrpayslip(models.Model):
 
         if is_asimilado:
             # ==========================================
-            # LÓGICA PARA ASIMILADOS (Sin Subsidio, Sin IMSS)
+            # LÓGICA PARA ASIMILADOS
             # ==========================================
             cfdi_values['otro_pago_list'] = []
             
             if cfdi_values.get('nomina'):
                 cfdi_values['nomina']['total_otros_pagos'] = 0.0
+                
+            if cfdi_values.get('nomina_emisor'):
+                if 'registro_patronal' in cfdi_values['nomina_emisor']:
+                    cfdi_values['nomina_emisor']['registro_patronal'] = False
 
+                if 'rfc_patron_origen' in cfdi_values['nomina_emisor']:
+                    cfdi_values['nomina_emisor']['rfc_patron_origen'] = False
+                    
             receptor = cfdi_values.get('nomina_receptor', {})
             
-            # Asignamos False en lugar de .pop() para evitar el KeyError en QWeb
             for field in [
                 'salario_diario_integrado',
                 'salario_base_cot_apor',
                 'riesgo_puesto',
                 'tipo_jornada',
                 'fecha_inicio_rel_laboral',
-                'antigüedad',
+                'antigüedad',                
             ]:
                 if field in receptor:
                     receptor[field] = False
                     
         else:
             # ==========================================
-            # LÓGICA PARA EMPLEADOS REGULARES (Subsidio vs ISR)
+            # LÓGICA PARA EMPLEADOS REGULARES
             # ==========================================
             subsidy_amount = 0.0
 
@@ -81,7 +87,6 @@ class Hrpayslip(models.Model):
                         or other_payment.get('importe')
                         or 0.0
                     )
-                    # Dejar Importe="0.00"
                     other_payment['importe'] = 0.0
                     break
 
@@ -95,9 +100,16 @@ class Hrpayslip(models.Model):
                         )
                         break
 
-        # ==========================
-        # RECALCULAR DEDUCCIONES (Aplica para ambos regímenes)
-        # ==========================
+        # ==========================================
+        # RECALCULAR DEDUCCIONES Y ELIMINAR ISR EN 0
+        # ==========================================
+        # Filtramos la lista para remover por completo el renglón del ISR (002) si llegó en 0
+        if 'deduccion_list' in cfdi_values:
+            cfdi_values['deduccion_list'] = [
+                d for d in cfdi_values['deduccion_list']
+                if not (d.get('tipo_deduccion') == '002' and float(d.get('importe', 0.0)) <= 0)
+            ]
+
         total_taxes_withheld = sum(
             float(d.get('importe', 0.0))
             for d in cfdi_values.get('deduccion_list', [])
@@ -112,25 +124,50 @@ class Hrpayslip(models.Model):
 
         total_deductions = total_taxes_withheld + total_other_deductions
 
-        cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = round(total_taxes_withheld, 2)
+        # CORRECCIÓN DEFINITIVA PARA EVITAR KEYERROR Y RECHAZO SAT (NOM92)
+        # Dejamos la llave para que QWeb no explote, pero con valor False para que Odoo no la meta al XML
+        if total_taxes_withheld > 0:
+            cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = round(total_taxes_withheld, 2)
+        else:
+            cfdi_values['nomina_deducciones']['total_impuestos_retenidos'] = False
+
         cfdi_values['nomina_deducciones']['total_otras_deducciones'] = round(total_other_deductions, 2)
         cfdi_values['nomina']['total_deducciones'] = round(total_deductions, 2)
 
-        # ==========================
+        # ==========================================
         # RECALCULAR OTROS PAGOS
-        # ==========================
+        # ==========================================
         total_other_payments = sum(
             float(op.get('importe', 0.0))
             for op in cfdi_values.get('otro_pago_list', [])
         )
-
         cfdi_values['nomina']['total_otros_pagos'] = round(total_other_payments, 2)
 
-        # ==========================
-        # RECALCULAR TOTALES DEL CFDI
-        # ==========================
+        # ==========================================
+        # RECONSTRUCCIÓN EN CASO DE INCAPACIDAD
+        # ==========================================
+        incapacidad_amount = sum(
+            float(d.get('importe', 0.0))
+            for d in cfdi_values.get('deduccion_list', [])
+            if d.get('tipo_deduccion') == '006'
+        )
+
         total_perceptions = float(cfdi_values['nomina'].get('total_percepciones') or 0.0)
 
+        if incapacidad_amount > 0:
+            total_perceptions = round(total_perceptions + incapacidad_amount, 2)
+            cfdi_values['nomina']['total_percepciones'] = total_perceptions
+            cfdi_values['nomina_percepciones']['total_sueldos'] = total_perceptions
+            cfdi_values['nomina_percepciones']['total_gravado'] = total_perceptions
+            
+            for percepcion in cfdi_values.get('percepcion_list', []):
+                if percepcion.get('tipo_percepcion') == '001':
+                    percepcion['importe_gravado'] = total_perceptions
+                    break
+
+        # ==========================================
+        # RECALCULAR TOTALES FINALES DEL CFDI
+        # ==========================================
         subtotal = round(total_perceptions + total_other_payments, 2)
 
         cfdi_values['subtotal'] = subtotal
